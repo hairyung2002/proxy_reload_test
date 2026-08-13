@@ -1,0 +1,17 @@
+# CDS — 클러스터 정의 (Nginx의 upstream 블록에 해당)
+# 실습 중에는 이 파일을 건드리지 않는다.
+# "무엇을 부를 것인가"는 그대로이고, "누가 거기 있는가"만 바뀐다.
+
+version_info: "1"
+resources:
+  - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+    name: backend
+    connect_timeout: 1s
+    lb_policy: ROUND_ROBIN
+    # 엔드포인트 목록을 클러스터 정의 안에 두지 않고 EDS로 분리한다.
+    # 이 분리가 오늘 세션의 핵심이다.
+    type: EDS
+    eds_cluster_config:
+      eds_config:
+        path_config_source:
+          path: /etc/envoy/eds.yaml

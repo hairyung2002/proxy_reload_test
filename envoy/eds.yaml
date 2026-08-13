@@ -1,0 +1,19 @@
+# EDS — 엔드포인트 목록 (Nginx upstream 블록 안의 server 줄에 해당)
+# Step 3에서 이 파일만 바뀐다. Envoy 프로세스는 재시작되지 않는다.
+
+version_info: "1"
+resources:
+  - "@type": type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment
+    cluster_name: backend
+    endpoints:
+      - lb_endpoints:
+          - endpoint:
+              address:
+                socket_address:
+                  address: 172.28.0.11
+                  port_value: 5678
+          - endpoint:
+              address:
+                socket_address:
+                  address: 172.28.0.12
+                  port_value: 5678

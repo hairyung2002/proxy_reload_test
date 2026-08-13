@@ -1,0 +1,71 @@
+# proxy-reload-test
+#
+# 고정 IP를 쓰는 이유:
+#   EDS 엔드포인트는 DNS 이름이 아니라 IP 주소로 표현된다.
+#   실습을 결정론적으로 만들기 위해 서브넷과 IP를 고정한다.
+#   (실제 환경에서는 이 IP가 계속 바뀌기 때문에 컨트롤 플레인이 필요하다)
+
+services:
+  backend-a:
+    image: hashicorp/http-echo:1.0
+    command: ["-text=backend-a", "-listen=:5678"]
+    networks:
+      labnet:
+        ipv4_address: 172.28.0.11
+
+  backend-b:
+    image: hashicorp/http-echo:1.0
+    command: ["-text=backend-b", "-listen=:5678"]
+    networks:
+      labnet:
+        ipv4_address: 172.28.0.12
+
+  # Step 2에서 backend-b를 대체할 새 백엔드.
+  # 기본으로 뜨지 않는다: docker compose up -d backend-c
+  backend-c:
+    image: hashicorp/http-echo:1.0
+    command: ["-text=backend-c", "-listen=:5678"]
+    profiles: ["extra"]
+    networks:
+      labnet:
+        ipv4_address: 172.28.0.13
+
+  nginx:
+    image: nginx:1.27-alpine
+    # 디렉터리를 마운트한다. 파일 단위로 마운트하면 에디터의
+    # atomic save(rename)가 마운트를 끊어버린다.
+    volumes:
+      - ./nginx:/etc/nginx/conf.d
+    ports:
+      - "8080:8080"
+    networks:
+      labnet:
+        ipv4_address: 172.28.0.2
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    # envoy 디렉터리를 통째로 마운트한다.
+    # 파일 단위로 마운트하면 atomic rename(mv)이 마운트를 깨뜨려
+    # Envoy가 변경을 감지하지 못한다.
+    volumes:
+      - ./envoy:/etc/envoy
+    command:
+      - "-c"
+      - "/etc/envoy/envoy.yaml"
+      - "--service-node"
+      - "lab"
+      - "--service-cluster"
+      - "lab"
+    ports:
+      - "8081:8081"
+      - "9901:9901"
+    networks:
+      labnet:
+        ipv4_address: 172.28.0.3
+
+networks:
+  labnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

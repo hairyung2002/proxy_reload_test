@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  proxy-reload-test 실습용 EC2 한 대.
+  SSH 키페어와 인바운드 보안그룹 규칙이 필요 없도록 Session Manager로 접속한다.
+  Docker + Compose 설치와 이미지 pull 까지 user data 에서 끝낸다.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "네트워크"
+        Parameters: [VpcId, SubnetId]
+      - Label:
+          default: "인스턴스"
+        Parameters: [InstanceType, LatestAmiId]
+      - Label:
+          default: "실습 자료"
+        Parameters: [RepoUrl]
+    ParameterLabels:
+      SubnetId:
+        default: "퍼블릭 서브넷을 선택하세요 (인터넷 게이트웨이 경유 필요)"
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 실습 인스턴스를 띄울 VPC. 기본 VPC 를 골라도 됩니다.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >
+      퍼블릭 서브넷을 선택하세요. Docker Hub / GitHub / SSM 엔드포인트로
+      아웃바운드가 나가야 합니다.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: 컨테이너 5개를 띄우므로 t3.small 이상을 권장합니다.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 최신 AMI (자동 조회)
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/CHANGE-ME/proxy-reload-test.git
+    Description: 실습 리포지토리 URL. 발표자가 공지한 주소로 바꾸세요.
+
+Resources:
+
+  # SSM 으로 접속하기 위한 최소 권한.
+  # AmazonSSMManagedInstanceCore 하나면 Session Manager 가 동작한다.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # 인바운드 규칙이 하나도 없다.
+  # 프록시는 인스턴스 안에서 localhost 로만 호출하므로 열 필요가 없다.
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: proxy-reload-test lab - outbound only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Docker Hub, GitHub, SSM
+      Tags:
+        - Key: Name
+          Value: proxy-reload-test-sg
+
+  LabInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      # 서브넷의 auto-assign public IP 설정과 무관하게 퍼블릭 IP를 붙인다.
+      # SSM 에이전트가 인터넷으로 나가지 못하면 Session Manager 접속이 안 된다.
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref InstanceSecurityGroup]
+          DeleteOnTermination: true
+      # 실습 후 인스턴스 안에서 shutdown 하면 그대로 종료되도록
+      InstanceInitiatedShutdownBehavior: terminate
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: proxy-reload-test
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xeuo pipefail
+          exec > >(tee /var/log/lab-bootstrap.log) 2>&1
+
+          # 부팅 시간을 줄이기 위해 전체 업데이트는 하지 않는다
+          dnf -y install docker git
+
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          # Compose v2 플러그인 (AL2023 기본 리포에 없음)
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -sSL \
+            "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          # 실습 리포지토리
+          git clone ${RepoUrl} /home/ec2-user/proxy-reload-test
+          chmod +x /home/ec2-user/proxy-reload-test/scripts/*.sh || true
+          chown -R ec2-user:ec2-user /home/ec2-user/proxy-reload-test
+
+          # 이미지 미리 받아두기 (현장 네트워크 부하 방지)
+          cd /home/ec2-user/proxy-reload-test
+          docker compose --profile extra pull
+
+          # 컨테이너까지 미리 띄워둔다
+          docker compose up -d
+
+          # 접속 시 안내가 뜨도록
+          cat > /etc/motd <<'MOTD'
+
+            proxy-reload-test 실습 환경
+
+            cd ~/proxy-reload-test
+            ./scripts/watch.sh          # 관찰 창 (이걸 먼저 띄우세요)
+
+            실습이 끝나면 CloudFormation 스택을 삭제해 주세요.
+
+          MOTD
+
+          touch /home/ec2-user/READY
+          chown ec2-user:ec2-user /home/ec2-user/READY
+
+Outputs:
+  InstanceId:
+    Description: 실습 인스턴스 ID
+    Value: !Ref LabInstance
+
+  SessionManagerUrl:
+    Description: 브라우저에서 바로 접속 (키페어 불필요)
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/systems-manager/session-manager/${LabInstance}?region=${AWS::Region}"
+
+  ReadyCheck:
+    Description: 접속 후 준비 완료 확인 명령
+    Value: "ls ~/READY  (파일이 보이면 부트스트랩 완료)"
+
+  Cleanup:
+    Description: 실습 종료 후
+    Value: "CloudFormation 콘솔에서 이 스택을 Delete 하세요."
