@@ -1,56 +1,64 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  proxy-reload-test 실습용 EC2 한 대.
-  SSH 키페어와 인바운드 보안그룹 규칙이 필요 없도록 Session Manager로 접속한다.
-  Docker + Compose 설치와 이미지 pull 까지 user data 에서 끝낸다.
+  proxy-reload-test lab - a single EC2 instance.
+  Connect via Session Manager (no SSH key pair, no inbound security group rule).
+  Docker, Compose, repo clone and image pull are all handled in user data.
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: "네트워크"
+          default: "Network"
         Parameters: [VpcId, SubnetId]
       - Label:
-          default: "인스턴스"
+          default: "Instance"
         Parameters: [InstanceType, LatestAmiId]
       - Label:
-          default: "실습 자료"
+          default: "Lab Repository"
         Parameters: [RepoUrl]
     ParameterLabels:
+      VpcId:
+        default: "VPC"
       SubnetId:
-        default: "퍼블릭 서브넷을 선택하세요 (인터넷 게이트웨이 경유 필요)"
+        default: "Public Subnet (must route to an Internet Gateway)"
+      InstanceType:
+        default: "Instance Type"
+      LatestAmiId:
+        default: "AMI (leave as is)"
+      RepoUrl:
+        default: "Lab Repository URL (leave as is)"
 
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
-    Description: 실습 인스턴스를 띄울 VPC. 기본 VPC 를 골라도 됩니다.
+    Description: VPC for the lab instance. The default VPC is fine.
 
   SubnetId:
     Type: AWS::EC2::Subnet::Id
     Description: >
-      퍼블릭 서브넷을 선택하세요. Docker Hub / GitHub / SSM 엔드포인트로
-      아웃바운드가 나가야 합니다.
+      Choose a PUBLIC subnet. The instance needs outbound access to
+      Docker Hub, GitHub and the SSM endpoints.
 
   InstanceType:
     Type: String
     Default: t3.small
     AllowedValues: [t3.micro, t3.small, t3.medium]
-    Description: 컨테이너 5개를 띄우므로 t3.small 이상을 권장합니다.
+    Description: Runs 5 containers. t3.small or larger is recommended.
 
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: Amazon Linux 2023 최신 AMI (자동 조회)
+    Description: Latest Amazon Linux 2023 AMI, resolved automatically.
 
   RepoUrl:
     Type: String
-    Default: https://github.com/CHANGE-ME/proxy-reload-test.git
-    Description: 실습 리포지토리 URL. 발표자가 공지한 주소로 바꾸세요.
+    Default: https://github.com/hairyung2002/proxy_reload_test.git
+    Description: Lab repository URL. Must be a public repository.
 
 Resources:
 
-  # SSM 으로 접속하기 위한 최소 권한.
-  # AmazonSSMManagedInstanceCore 하나면 Session Manager 가 동작한다.
+  # Minimum permission needed for Session Manager.
+  # AmazonSSMManagedInstanceCore alone is enough.
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -69,8 +77,8 @@ Resources:
     Properties:
       Roles: [!Ref InstanceRole]
 
-  # 인바운드 규칙이 하나도 없다.
-  # 프록시는 인스턴스 안에서 localhost 로만 호출하므로 열 필요가 없다.
+  # No inbound rules at all.
+  # The proxies are called from inside the instance over localhost.
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -90,15 +98,15 @@ Resources:
       ImageId: !Ref LatestAmiId
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref InstanceProfile
-      # 서브넷의 auto-assign public IP 설정과 무관하게 퍼블릭 IP를 붙인다.
-      # SSM 에이전트가 인터넷으로 나가지 못하면 Session Manager 접속이 안 된다.
+      # Attach a public IP regardless of the subnet's auto-assign setting.
+      # Without outbound internet the SSM agent cannot register,
+      # and Session Manager will not connect.
       NetworkInterfaces:
         - DeviceIndex: 0
           AssociatePublicIpAddress: true
           SubnetId: !Ref SubnetId
           GroupSet: [!Ref InstanceSecurityGroup]
           DeleteOnTermination: true
-      # 실습 후 인스턴스 안에서 shutdown 하면 그대로 종료되도록
       InstanceInitiatedShutdownBehavior: terminate
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
@@ -115,40 +123,40 @@ Resources:
           set -xeuo pipefail
           exec > >(tee /var/log/lab-bootstrap.log) 2>&1
 
-          # 부팅 시간을 줄이기 위해 전체 업데이트는 하지 않는다
+          # Skip the full system update to keep boot time short
           dnf -y install docker git
 
           systemctl enable --now docker
           usermod -aG docker ec2-user
 
-          # Compose v2 플러그인 (AL2023 기본 리포에 없음)
+          # Compose v2 plugin (not in the AL2023 default repo)
           mkdir -p /usr/local/lib/docker/cli-plugins
           curl -sSL \
             "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
             -o /usr/local/lib/docker/cli-plugins/docker-compose
           chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
-          # 실습 리포지토리
+          # Lab repository
           git clone ${RepoUrl} /home/ec2-user/proxy-reload-test
           chmod +x /home/ec2-user/proxy-reload-test/scripts/*.sh || true
           chown -R ec2-user:ec2-user /home/ec2-user/proxy-reload-test
 
-          # 이미지 미리 받아두기 (현장 네트워크 부하 방지)
+          # Pre-pull images so the venue network is not hammered
           cd /home/ec2-user/proxy-reload-test
           docker compose --profile extra pull
 
-          # 컨테이너까지 미리 띄워둔다
+          # Bring the containers up ahead of time
           docker compose up -d
 
-          # 접속 시 안내가 뜨도록
+          # Greeting shown on connect
           cat > /etc/motd <<'MOTD'
 
-            proxy-reload-test 실습 환경
+            proxy-reload-test lab
 
             cd ~/proxy-reload-test
-            ./scripts/watch.sh          # 관찰 창 (이걸 먼저 띄우세요)
+            ./scripts/watch.sh      <- start here (leave this window open)
 
-            실습이 끝나면 CloudFormation 스택을 삭제해 주세요.
+            Please delete the CloudFormation stack when you are done.
 
           MOTD
 
@@ -157,17 +165,17 @@ Resources:
 
 Outputs:
   InstanceId:
-    Description: 실습 인스턴스 ID
+    Description: Lab instance ID
     Value: !Ref LabInstance
 
   SessionManagerUrl:
-    Description: 브라우저에서 바로 접속 (키페어 불필요)
+    Description: Open in a browser to connect (no key pair needed)
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/systems-manager/session-manager/${LabInstance}?region=${AWS::Region}"
 
   ReadyCheck:
-    Description: 접속 후 준비 완료 확인 명령
-    Value: "ls ~/READY  (파일이 보이면 부트스트랩 완료)"
+    Description: Run this after connecting to confirm bootstrap finished
+    Value: "ls ~/READY   -> if the file exists, the instance is ready"
 
   Cleanup:
-    Description: 실습 종료 후
-    Value: "CloudFormation 콘솔에서 이 스택을 Delete 하세요."
+    Description: After the session
+    Value: "Please DELETE this stack from the CloudFormation console."
